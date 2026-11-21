@@ -63,7 +63,8 @@
 #define WIFI_TIMEOUT 20000UL         // скільки чекати підключення до роутера
 #define SCAN_TTL_MS  15000UL         // кеш списку мереж
 #define MAX_NETS     24
-#define AP_LINGER_MS 3000UL          // стільки AP живе ПІСЛЯ успішного підключення
+#define AP_LINGER_MS 8000UL          // показати домашній IP, потім закрити AP навіть з підключеним телефоном
+#define AP_SCAN_TTL_MS 120000UL      // повторне відкриття iOS-порталу не запускає новий радіоскан
 #define AP_RETRY_MS  15000UL          // AP чекаємо лише коли кредлів немає (перше налаштування)
 // HC-SR501 стоїть поруч з антеною: 20.5 dBm (дефолт SDK) дає наводку на D5.
 // 8.5 dBm різко зменшує 2.4-ГГц поле й імпульси струму, дальності Wi-Fi вистачає.
@@ -1097,8 +1098,11 @@ NetInfo nets[MAX_NETS];
 int netCount = 0;
 bool netsValid = false;
 unsigned long netsAt = 0;
+bool apScanPending = false;
 
 bool connectPending = false;
+bool apJoinPending = false;
+unsigned long apJoinApplyAt = 0;
 unsigned long connectStartedAt = 0;
 unsigned long staRetryAt = 0;
 #define STA_RETRY_MS 10000UL
@@ -1208,11 +1212,8 @@ String jsonEscape(const String& s) {
 }
 
 // ---------- скан мереж (з кешем) ----------
-void scanNets() {
-  if (netsValid && (millis() - netsAt) < SCAN_TTL_MS) return;
-
+void collectNets(int n) {
   netsAt = millis();
-  int n = WiFi.scanNetworks(false, true);
   netCount = 0;
 
   for (int i = 0; i < n && netCount < MAX_NETS; i++) {
@@ -1249,6 +1250,12 @@ void scanNets() {
   }
 
   netsValid = true;
+}
+
+void scanNets() {
+  if (netsValid && (millis() - netsAt) < SCAN_TTL_MS) return;
+  if (apScanPending) return;  // do not interrupt the portal's async scan
+  collectNets(WiFi.scanNetworks(false, true));
 }
 
 // ================= ГРАФІК ВІДКЛЮЧЕНЬ =================
@@ -2981,7 +2988,106 @@ static void httpChunkEnd() {
   server.sendContent(F("0\r\n\r\n"));
 }
 
+bool requestFromAP() {
+  // Check the interface receiving this connection, not just whether AP is running.
+  return apRunning && server.client().localIP() == WiFi.softAPIP();
+}
+
+void redirectToPortal() {
+  server.sendHeader("Cache-Control", "no-store");
+  server.sendHeader("Location", String("http://") + WiFi.softAPIP().toString() + "/", true);
+  server.send(302, "text/plain", "Open the Wi-Fi setup portal");
+}
+
+void handleAPNetworks() {
+  server.sendHeader("Cache-Control", "no-store");
+  if (!requestFromAP()) { server.send(403, "text/plain", "AP only"); return; }
+  if (apScanPending) {
+    const int result = WiFi.scanComplete();
+    if (result == WIFI_SCAN_RUNNING) {
+      server.send(202, "application/json", "{\"scanning\":true}"); return;
+    }
+    apScanPending = false;
+    if (result < 0) {
+      WiFi.scanDelete();
+      server.send(503, "application/json", "{\"error\":\"scan_failed\"}"); return;
+    }
+    collectNets(result);
+  } else if (connectPending && millis() - connectStartedAt < WIFI_TIMEOUT) {
+    // Scanning during a deliberate join can move the AP radio off-channel.
+    server.send(202, "application/json", "{\"scanning\":true}"); return;
+  } else if (!netsValid || server.hasArg("refresh") || millis() - netsAt >= AP_SCAN_TTL_MS) {
+    const int result = WiFi.scanNetworks(true, false);
+    if (result == WIFI_SCAN_RUNNING) {
+      apScanPending = true;
+      server.send(202, "application/json", "{\"scanning\":true}"); return;
+    }
+    if (result < 0) {
+      server.send(503, "application/json", "{\"error\":\"scan_failed\"}"); return;
+    }
+    collectNets(result);
+  }
+  String json = "{\"networks\":[";
+  for (int i = 0; i < netCount; ++i) {
+    if (i) json += ',';
+    json += "{\"ssid\":\"" + jsonEscape(nets[i].ssid) + "\",\"rssi\":" + String(nets[i].rssi);
+    json += ",\"secure\":"; json += nets[i].enc ? "true}" : "false}";
+  }
+  json += "]}";
+  server.send(200, "application/json", json);
+}
+
+void pageAPWiFi() {
+  // Send the small page immediately; scanning must not stall captive-portal probes.
+  server.sendHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+  server.send_P(200, "text/html; charset=utf-8", PSTR(R"HTML(<!doctype html>
+<html lang="uk"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Світляк — підключення Wi-Fi</title><style>
+body{font:17px system-ui,Arial;background:#0f141a;color:#e8eef5;max-width:420px;margin:32px auto;padding:18px;color-scheme:dark}
+form{padding:20px;background:#1a222b;border-radius:16px}h1{font-size:25px}label{display:block;margin-top:14px}
+select,input,button{box-sizing:border-box;width:100%;padding:13px;margin:8px 0;border-radius:9px;border:1px solid #33414f;font:inherit}
+button{background:#2f81f7;color:white;cursor:pointer}button:disabled{opacity:.5}small,p{line-height:1.5}a{color:#79b8ff}
+</style></head><body><h1>Підключити Світляк до Wi-Fi</h1>
+<form method="post" action="/connect" id="wifiForm">
+<label for="ssid">Домашня мережа 2,4 ГГц</label><select id="ssid" name="ssid" required disabled><option value="">Шукаємо мережі…</option></select>
+<button id="refresh" type="button">Оновити список мереж</button><small id="scanHint" role="status"></small>
+<label for="pass">Пароль Wi-Fi</label><input id="pass" name="pass" type="password" maxlength="63" autocomplete="new-password" placeholder="Пароль домашньої мережі">
+<button id="connect" disabled>Підключити</button></form>
+<p id="result" role="status">Вибери свою мережу та введи пароль. Налаштування лампи будуть доступні після підключення.</p>
+<small>Якщо телефон пише «без інтернету», залишайся в мережі Світляка. Адреса цієї сторінки: <b>http://192.168.4.1/</b></small>
+<script>
+const ssid=document.getElementById('ssid'),refresh=document.getElementById('refresh'),hint=document.getElementById('scanHint'),connect=document.getElementById('connect');
+const result=document.getElementById('result');
+async function request(path){const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),8000);
+try{const response=await fetch(path,{cache:'no-store',signal:controller.signal});return {status:response.status,ok:response.ok,data:await response.json()};}finally{clearTimeout(timer);}}
+async function scan(force=false){refresh.disabled=true;ssid.disabled=true;connect.disabled=true;hint.textContent='Шукаємо мережі…';const previous=ssid.value;
+try{for(let attempt=0;attempt<30;attempt++){
+const response=await request(force&&attempt===0?'/wifi-networks?refresh=1':'/wifi-networks');
+if(response.status===202){await new Promise(resolve=>setTimeout(resolve,1000));continue;}
+if(!response.ok)throw Error();const data=response.data;ssid.replaceChildren(new Option('Вибери свою мережу',''));
+for(const net of data.networks)ssid.add(new Option(net.ssid+(net.secure?' · 🔒':' · відкрита')+' · '+net.rssi+' dBm',net.ssid));
+if([...ssid.options].some(option=>option.value===previous))ssid.value=previous;
+hint.textContent=data.networks.length?'Назву мережі вводити не потрібно.':'Мереж не знайдено. Перевір, чи ввімкнений Wi-Fi 2,4 ГГц, та онови список.';return;
+}throw Error();}catch(e){hint.textContent='Не вдалося отримати список. Натисни «Оновити список мереж».';}
+finally{refresh.disabled=false;ssid.disabled=false;connect.disabled=!ssid.value;}}
+ssid.onchange=()=>{connect.disabled=!ssid.value;};refresh.onclick=()=>scan(true);
+document.getElementById('wifiForm').onsubmit=()=>{connect.disabled=true;connect.textContent='Підключення…';};
+async function check(){try{const s=(await request('/status')).data;if(s.state==='ok'){
+result.replaceChildren(document.createTextNode('Підключено! Поверни телефон до домашньої мережі. Сторінка лампи: '));
+const link=document.createElement('a');link.href='http://'+s.ip+'/';link.textContent=link.href;result.appendChild(link);return;}}
+catch(e){}setTimeout(check,2000);}scan();check();
+</script></body></html>)HTML"));
+}
+
+void lanRoute(const char* path, HTTPMethod method, ESP8266WebServer::THandlerFunction handler) {
+  server.on(path, method, [handler]() {
+    if (requestFromAP()) { redirectToPortal(); return; }
+    handler();
+  });
+}
+
 void handleRoot() {
+  if (requestFromAP()) { pageAPWiFi(); return; }
   if (server.hasArg("rescan")) netsValid = false;
   scanNets();
 
@@ -3754,20 +3860,28 @@ void handleConnect() {
   String ssid = server.arg("ssid");
   String pass = server.arg("pass");
 
-  if (ssid.length() == 0) {
+  if (ssid.length() == 0 || ssid.length() > 32 || pass.length() > 63 ||
+      (pass.length() > 0 && pass.length() < 8)) {
     server.send(200, "text/html",
       F("<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<body style='font-family:system-ui;background:#0f141a;color:#eee;padding:16px'>"
-        "<h2>Мережу не вибрано</h2><a style='color:#79b8ff' href='/'>← Назад</a></body></html>"));
+        "<h2>Перевірте мережу й пароль</h2><p>Виберіть мережу. Пароль: 8–63 символи або порожній для відкритої мережі.</p><a style='color:#79b8ff' href='/'>← Назад</a></body></html>"));
     return;
   }
 
   saveCreds(ssid, pass);
-  WiFi.setAutoReconnect(true);
-  WiFi.disconnect(false);
-  WiFi.begin(ssid.c_str(), pass.c_str());
+  apJoinPending = requestFromAP();
+  if (apJoinPending) {
+    // Let iOS receive the POST response BEFORE a possible AP channel change.
+    apJoinApplyAt = millis() + 1200UL;
+  } else {
+    WiFi.setAutoReconnect(true);
+    WiFi.disconnect(false);
+    WiFi.begin(ssid.c_str(), pass.c_str());
+  }
   connectPending = true;
   connectStartedAt = millis();
+  staRetryAt = connectStartedAt + WIFI_TIMEOUT;
 
   String p;
   p.reserve(1400);
@@ -3787,10 +3901,8 @@ async function poll(){
     const j = await r.json();
     const el = document.getElementById('st');
     if(j.state==='ok'){
-      el.innerHTML = '✅ Підключено до <b>'+j.ssid+'</b><br>IP: '+j.ip+
-        '<br><br>Точка доступу вимикається — це вікно можна закрити.'+
-        '<br><small>Портал залишиться доступним за адресою http://'+j.ip+'/ у вашій мережі.</small>'+
-        '<br><br><a href="/">Продовжити налаштування →</a>';
+      el.replaceChildren(document.createTextNode('✅ Підключено до '+j.ssid+'. Поверніть телефон до домашньої мережі та відкрийте: '));
+      const link=document.createElement('a');link.href='http://'+j.ip+'/';link.textContent=link.href;el.appendChild(link);
       document.title = 'Готово';
       return;
     }
@@ -3821,6 +3933,12 @@ void handleStatus() {
   }
 
   String j = "{\"state\":\"" + state + "\"";
+  if (requestFromAP()) {
+    j += ",\"ssid\":\"" + jsonEscape(WiFi.SSID()) + "\",\"ip\":\"" + WiFi.localIP().toString() + "\"}";
+    server.sendHeader("Cache-Control", "no-store");
+    server.send(200, "application/json", j);
+    return;
+  }
   j += ",\"lamp\":\"" + String(stateName(lampState)) + "\"";
   j += ",\"ldr\":" + String(ldrRaw);
   j += ",\"lvl\":" + String(lightLevelFor(ldrSmooth));
@@ -4094,6 +4212,7 @@ void handleForget() {
 }
 
 void handleNotFound() {
+  if (requestFromAP()) { redirectToPortal(); return; }
   // captive portal: будь-який запит -> на головну (відносний шлях працює і через AP, і через LAN)
   server.sendHeader("Location", "/", true);
   server.send(302, "text/plain", "");
@@ -4104,10 +4223,15 @@ void apStart() {
   if (apRunning) return;
 
   WiFi.mode(WIFI_AP_STA);
-  WiFi.setOutputPower(WIFI_TX_DBM);
+  WiFi.setAutoReconnect(false);
+  WiFi.disconnect(false);
+  connectPending = false;
+  apJoinPending = false;
+  apJoinApplyAt = 0;
+  WiFi.setOutputPower(17.0f);  // setup needs reliable phone coverage; restored when AP stops
   // STA ще не підключено: шукаємо канал нашого роутера скануванням.
   // ESP8266 STA+AP працюють лише на одному каналі, ch=1 блокиє підключення.
-  if (staChannel < 1 || staChannel > 14) {
+  if (!netsValid || (haveCreds && (staChannel < 1 || staChannel > 14))) {
     int n = WiFi.scanNetworks();
     for (int i = 0; i < n; i++) {
       bool m = (WiFi.SSID(i) == String(creds.ssid));
@@ -4121,15 +4245,22 @@ void apStart() {
       Serial.println(m ? 1 : 0);
       if (m) { staChannel = WiFi.channel(i); }
     }
-    WiFi.scanDelete();
+    collectNets(n);  // cache the list BEFORE the phone joins the AP
     Serial.print("AP scan: ");
     Serial.print(n);
     Serial.print(" мереж, канал ");
     Serial.println(staChannel);
   }
   uint8_t ch = (staChannel >= 1 && staChannel <= 14) ? staChannel : 1;
-  WiFi.softAP(apSsidStr.c_str(), AP_PASSWORD, ch);
-  dnsServer.start(53, "*", WiFi.softAPIP());
+  const IPAddress portalIP(192, 168, 4, 1);
+  if (!WiFi.softAPConfig(portalIP, portalIP, IPAddress(255, 255, 255, 0)) ||
+      !WiFi.softAP(apSsidStr.c_str(), AP_PASSWORD, ch)) {
+    Serial.println("AP: start failed; will retry");
+    return;
+  }
+  if (!dnsServer.start(53, "*", WiFi.softAPIP()))
+    Serial.println("AP: DNS start failed; direct http://192.168.4.1/ remains available");
+  WiFi.mode(WIFI_AP);  // stable setup radio; STA joins only after pressing Connect
 
   apRunning = true;
   apStopAt = 0;
@@ -4151,6 +4282,8 @@ void apStop() {
   dnsServer.stop();
   WiFi.softAPdisconnect(true);   // точка доступу більше не роздається
   WiFi.mode(WIFI_STA);           // назад у чистий STA
+  WiFi.setAutoReconnect(true);
+  WiFi.setOutputPower(WIFI_TX_DBM);
   apRunning = false;
   apStopAt = 0;
 
@@ -4182,24 +4315,42 @@ void wifiBegin() {
   server.on("/", HTTP_GET, handleRoot);
   server.on("/connect", HTTP_POST, handleConnect);
   server.on("/status", HTTP_GET, handleStatus);
-  server.on("/live", HTTP_GET, handleLive);
-  server.on("/pir", HTTP_GET, handlePirPage);
-  server.on("/pirdata", HTTP_GET, handlePirData);
-  server.on("/pirevents", HTTP_GET, handlePirEvents);
-  server.on("/forget", HTTP_GET, handleForget);
-  server.on("/save", HTTP_POST, handleSave);
-  server.on("/reset", HTTP_POST, handleReset);
-  server.on("/schedsync", HTTP_POST, handleSchedSync);
-  server.on("/alertsync", HTTP_POST, handleAlertSync);
-  server.on("/alerttest", HTTP_GET, handleAlertTest);
-  server.on("/beztest", HTTP_GET, handleBezTest);
-  server.on("/reboot", HTTP_POST, handleReboot);
-  server.on("/wifitest", HTTP_GET, handleWifiTest);
+  server.on("/wifi-networks", HTTP_GET, handleAPNetworks);
+  lanRoute("/live", HTTP_GET, handleLive);
+  lanRoute("/pir", HTTP_GET, handlePirPage);
+  lanRoute("/pirdata", HTTP_GET, handlePirData);
+  lanRoute("/pirevents", HTTP_GET, handlePirEvents);
+  lanRoute("/forget", HTTP_GET, handleForget);
+  lanRoute("/save", HTTP_POST, handleSave);
+  lanRoute("/reset", HTTP_POST, handleReset);
+  lanRoute("/schedsync", HTTP_POST, handleSchedSync);
+  lanRoute("/alertsync", HTTP_POST, handleAlertSync);
+  lanRoute("/alerttest", HTTP_GET, handleAlertTest);
+  lanRoute("/beztest", HTTP_GET, handleBezTest);
+  lanRoute("/reboot", HTTP_POST, handleReboot);
+  lanRoute("/wifitest", HTTP_GET, handleWifiTest);
+  // OS connectivity checks must redirect to a numeric, HTTP-only portal URL.
+  const char* probes[] = {"/generate_204", "/gen_204",
+    "/connecttest.txt", "/ncsi.txt", "/redirect", "/canonical.html", "/success.txt"};
+  for (const char* path : probes) server.on(path, HTTP_GET, []() {
+    if (requestFromAP()) redirectToPortal();
+    else { server.sendHeader("Location", "/", true); server.send(302, "text/plain", ""); }
+  });
+  // iOS CNA is less fragile when its initial HTTP probe gets the setup page
+  // directly, with no extra redirect round-trip. Never return Apple's Success page.
+  server.on("/hotspot-detect.html", HTTP_GET, []() {
+    if (requestFromAP()) pageAPWiFi();
+    else { server.sendHeader("Location", "/", true); server.send(302, "text/plain", ""); }
+  });
+  server.on("/library/test/success.html", HTTP_GET, []() {
+    if (requestFromAP()) pageAPWiFi();
+    else { server.sendHeader("Location", "/", true); server.send(302, "text/plain", ""); }
+  });
   server.onNotFound(handleNotFound);
   server.begin();
 
-  // AP НЕ піднімаємо одразу: STA+AP на різних каналах блоки підключення.
-  // AP з'явиться, якщо за AP_RETRY_MS не підключились (staChannel тоді 0 -> ch=1).
+  // Existing credentials get a STA-only attempt first. Without credentials,
+  // start the setup portal immediately; failed saved connections get a fallback AP.
   staDownTracked = true;
   staDownSince = millis();
 
@@ -4207,10 +4358,12 @@ void wifiBegin() {
     WiFi.begin(creds.ssid, creds.pass);
     connectPending = true;
     connectStartedAt = millis();
+    staRetryAt = connectStartedAt + WIFI_TIMEOUT;
     Serial.print("STA -> ");
     Serial.println(creds.ssid);
   } else {
     Serial.println("STA: мережа ще не збережена");
+    apStart();  // first-time setup must be available immediately, not after 15 s
   }
 }
 
@@ -4240,11 +4393,13 @@ void wifiStateTick() {
 
   if (connected) {
     connectPending = false;
+    apJoinPending = false;
     staDownTracked = false;
     staChannel = WiFi.channel();   // канал роутера (для AP: той самий канал)
     mdnsStart();
 
-    // підключились -> даємо 3 с показати результат і гасимо AP
+    // Give the phone time to receive the home IP, then close the setup AP
+    // regardless of whether the phone is still associated.
     if (apRunning) {
       if (apStopAt == 0) apStopAt = now + AP_LINGER_MS;
       else if (timeReached(now, apStopAt)) apStop();
@@ -4253,7 +4408,7 @@ void wifiStateTick() {
     mdnsStop();
 
     // STA повторюємо раз на STA_RETRY_MS: після збою роутера драйвер сам не відновлюється
-    if (haveCreds && timeReached(now, staRetryAt)) {
+    if (!apRunning && haveCreds && timeReached(now, staRetryAt)) {
       staRetryAt = now + STA_RETRY_MS;
       WiFi.begin(creds.ssid, creds.pass);
       Serial.print("STA: retry (");
@@ -4263,7 +4418,7 @@ void wifiStateTick() {
 
     // ДАГОСЛИТ: один раз після довгого провалу (скан рве поточне підключення,
     // тому робимо його лише коли STA немає > 60 с і не частіше ніж раз на 60 с)
-    if (haveCreds && (now - staDownSince > 60000UL) && timeReached(now, staScanAt)) {
+    if (!apRunning && haveCreds && (now - staDownSince > 60000UL) && timeReached(now, staScanAt)) {
       staScanAt = now + 60000UL;
       int n = WiFi.scanNetworks();
       Serial.print("SCAN: n=");
@@ -4288,13 +4443,23 @@ void wifiStateTick() {
       }
     }
 
+    // A bad password must not leave the SDK roaming/retrying under the portal.
+    // Retain connectPending so /status can report the failed attempt to the UI.
+    if (apRunning && apJoinPending && now - connectStartedAt >= WIFI_TIMEOUT) {
+      WiFi.disconnect(false);
+      WiFi.mode(WIFI_AP);
+      apJoinPending = false;
+      Serial.println("AP: join timed out; stable setup mode restored");
+    }
+    if (apRunning) apStopAt = 0;
+
     if (!staDownTracked) {
       staDownTracked = true;
       staDownSince = now;
     }
-    // AP тільки для ПЕРШОГО налаштування (немає збережених кредлів).
-    // ESP8266 має одну радіосхвильність: AP блокує STA, тож якщо кредли є - AP не піднімаємо.
-    if (!apRunning && apStopAt == 0 && !haveCreds && (now - staDownSince >= AP_RETRY_MS)) {
+    // Recovery must remain accessible even after a router/password change.
+    const unsigned long portalDelay = haveCreds ? 30000UL : 0UL;
+    if (!apRunning && apStopAt == 0 && (now - staDownSince >= portalDelay)) {
       apStart();
     }
   }
@@ -4324,6 +4489,15 @@ void wifiLoop() {
 
   if (apRunning) dnsServer.processNextRequest();
   server.handleClient();
+  if (apJoinApplyAt && timeReached(now, apJoinApplyAt)) {
+    apJoinApplyAt = 0;
+    WiFi.setAutoReconnect(false);
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.disconnect(false);
+    WiFi.begin(creds.ssid, creds.pass);
+    connectStartedAt = millis();
+    staRetryAt = connectStartedAt + WIFI_TIMEOUT;
+  }
   if (wifiOffApplyAt || wifiOffUntil) return;   // під час тесту STA/AP логіку не чіпаємо
   wifiStateTick();
   if (mdnsRunning) MDNS.update();

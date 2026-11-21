@@ -110,13 +110,16 @@ Replace `COM3` with your own port. For NodeMCU, use `esp8266:esp8266:nodemcuv2` 
 
 ## First-time setup
 
-1. With no saved Wi-Fi credentials, wait approximately 15 seconds for **`Svitlyak-<id>`** to appear.
+1. With no saved Wi-Fi credentials, **`Svitlyak-<id>`** starts after a short initial scan. If a saved home network is unavailable, a recovery AP starts after approximately 30 seconds (plus any channel scan).
 2. Connect using the default password **`svitlyak123`**. This is a public setup password, not your home Wi-Fi password. Change `AP_PASSWORD` before building if needed.
-3. Open `http://192.168.4.1/`, select your 2.4 GHz home network, and enter its password.
-4. After connection, use the IP address shown in Serial/router settings, or `http://svitlyak-<id>.local/` where mDNS is supported. The setup AP shuts down after a successful connection.
-5. Select the lighting mode, brightness, and motion hold time, then save.
+3. The AP serves **only Wi-Fi setup**: choose your 2.4 GHz home network from the scanned list and enter its password. Lamp settings and diagnostic routes are not accessible through the AP. An initial scan is cached before the AP opens; reopening the iPhone portal reuses that list for up to two minutes rather than starting another radio scan. Manual refresh uses asynchronous scanning with error/timeout messages.
+4. iOS HTTP probes receive the Wi-Fi setup page directly; Android/Windows probes redirect to `http://192.168.4.1/`. Automatic popup behavior depends on the phone and cannot be guaranteed: open that **HTTP** address manually if needed, accept staying connected without internet, and temporarily disable VPN/mobile-data switching if it interferes. HTTPS-only browsing cannot be redirected by the device.
+5. After connection, the page displays the lamp's **home-network IP**. The setup AP closes automatically after **8 seconds of successful home-network connection**, even if the phone is still associated. Switch the phone back to your home Wi-Fi and open that address, or `http://svitlyak-<id>.local/` where mDNS is supported. Failed joins leave the AP available. During setup AP transmit power is 17 dBm; normal 8.5 dBm returns when it closes.
+6. Select the lighting mode, brightness, and motion hold time, then save.
 
 Home Wi-Fi credentials are entered on the device and stored in EEPROM, not embedded in this repository. Serial output uses **115200 baud**.
+
+For iPhone portal stability, the fallback AP suspends background STA retries and diagnostic radio scans. The station joins the home network only after **Connect** is pressed; that join is deferred by 1.2 seconds so the POST response can reach the phone before a possible channel change. A failed join returns to AP-only setup after 20 seconds; it does not silently retry indefinitely under the portal. After success the captive window has 8 seconds to display the result before the AP closes. These are firmware-side mitigations, not a guarantee of behavior on every iOS version; physical iPhone testing is still required.
 
 ## Lighting behavior
 
