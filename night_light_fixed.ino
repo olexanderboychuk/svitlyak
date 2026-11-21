@@ -65,6 +65,9 @@
 #define MAX_NETS     24
 #define AP_LINGER_MS 8000UL          // показати домашній IP, потім закрити AP навіть з підключеним телефоном
 #define AP_SCAN_TTL_MS 120000UL      // повторне відкриття iOS-порталу не запускає новий радіоскан
+#define WIFI_JOIN_TX_DBM 17.0f      // надійне підключення; після отримання IP повертаємо потужність нічника
+#define AP_AUTO_RETRY_MS 30000UL    // повторювати збережену мережу, коли ніхто не налаштовує AP
+#define WIFI_DHCP_TIMEOUT_MS 45000UL // не переривати асоційовану станцію до завершення DHCP
 #define AP_RETRY_MS  15000UL          // AP чекаємо лише коли кредлів немає (перше налаштування)
 // HC-SR501 стоїть поруч з антеною: 20.5 dBm (дефолт SDK) дає наводку на D5.
 // 8.5 dBm різко зменшує 2.4-ГГц поле й імпульси струму, дальності Wi-Fi вистачає.
@@ -1103,9 +1106,15 @@ bool apScanPending = false;
 bool connectPending = false;
 bool apJoinPending = false;
 unsigned long apJoinApplyAt = 0;
+bool apAutoJoin = false;
+unsigned long apAutoRetryAt = 0;
+bool staWasConnected = false;
+bool staAssociated = false;
+unsigned long staAssociatedAt = 0;
+WiFiEventHandler staLinkHandler, staLostHandler;
 unsigned long connectStartedAt = 0;
 unsigned long staRetryAt = 0;
-#define STA_RETRY_MS 10000UL
+#define STA_RETRY_MS 20000UL
 unsigned long staScanAt = 0;
 // ДАГОСЛИТ: тест «радіо вимкнено» для PIR
 unsigned long wifiOffApplyAt = 0, wifiOffUntil = 0;
@@ -1164,15 +1173,31 @@ void loadCreds() {
   haveCreds = (creds.magic == CRED_MAGIC) && (creds.ssid[0] != '\0');
 }
 
-void saveCreds(const String& ssid, const String& pass) {
-  creds.magic = CRED_MAGIC;
-  memset(creds.ssid, 0, sizeof(creds.ssid));
-  memset(creds.pass, 0, sizeof(creds.pass));
-  ssid.substring(0, 32).toCharArray(creds.ssid, sizeof(creds.ssid));
-  pass.substring(0, 63).toCharArray(creds.pass, sizeof(creds.pass));
-  EEPROM.put(0, creds);
-  EEPROM.commit();
+bool saveCreds(const String& ssid, const String& pass) {
+  WifiCreds next = {};
+  next.magic = CRED_MAGIC;
+  ssid.toCharArray(next.ssid, sizeof(next.ssid));
+  pass.toCharArray(next.pass, sizeof(next.pass));
+  EEPROM.put(0, next);
+  if (!EEPROM.commit()) {
+    EEPROM.put(0, creds);  // retain the old credentials for any later settings save
+    Serial.println("WIFI SAVE: flash write failed");
+    return false;
+  }
+  // Reload from actual flash, not the RAM mirror returned by EEPROM.get().
+  EEPROM.end();
+  EEPROM.begin(EEPROM_SIZE);
+  WifiCreds verified = {};
+  EEPROM.get(0, verified);
+  if (memcmp(&next, &verified, sizeof(next)) != 0) {
+    EEPROM.put(0, creds);
+    Serial.println("WIFI SAVE: flash verification failed");
+    return false;
+  }
+  creds = next;
   haveCreds = true;
+  Serial.println("WIFI SAVE: verified in flash (password not logged)");
+  return true;
 }
 
 void clearCreds() {
@@ -3013,7 +3038,8 @@ void handleAPNetworks() {
       server.send(503, "application/json", "{\"error\":\"scan_failed\"}"); return;
     }
     collectNets(result);
-  } else if (connectPending && millis() - connectStartedAt < WIFI_TIMEOUT) {
+  } else if (connectPending && (millis() - connectStartedAt < WIFI_TIMEOUT ||
+             (staAssociated && millis() - staAssociatedAt < WIFI_DHCP_TIMEOUT_MS))) {
     // Scanning during a deliberate join can move the AP radio off-channel.
     server.send(202, "application/json", "{\"scanning\":true}"); return;
   } else if (!netsValid || server.hasArg("refresh") || millis() - netsAt >= AP_SCAN_TTL_MS) {
@@ -3869,13 +3895,20 @@ void handleConnect() {
     return;
   }
 
-  saveCreds(ssid, pass);
+  if (!saveCreds(ssid, pass)) {
+    server.send(500, "text/html; charset=utf-8",
+      F("<meta charset='utf-8'><h2>Не вдалося зберегти Wi-Fi</h2><p>Дані не підтверджені у flash. Перевірте живлення й спробуйте ще раз.</p><a href='/'>Назад</a>"));
+    return;
+  }
+  apAutoJoin = false;
   apJoinPending = requestFromAP();
   if (apJoinPending) {
     // Let iOS receive the POST response BEFORE a possible AP channel change.
     apJoinApplyAt = millis() + 1200UL;
   } else {
     WiFi.setAutoReconnect(true);
+    WiFi.setOutputPower(WIFI_JOIN_TX_DBM);
+    staAssociated = false;
     WiFi.disconnect(false);
     WiFi.begin(ssid.c_str(), pass.c_str());
   }
@@ -3924,7 +3957,8 @@ void handleStatus() {
   if (WiFi.status() == WL_CONNECTED) {
     state = "ok";
     connectPending = false;
-  } else if (connectPending && (millis() - connectStartedAt > WIFI_TIMEOUT)) {
+  } else if (connectPending && (millis() - connectStartedAt > WIFI_TIMEOUT) &&
+             !(staAssociated && millis() - staAssociatedAt < WIFI_DHCP_TIMEOUT_MS)) {
     state = "fail";
   } else if (connectPending) {
     state = "connecting";
@@ -4224,10 +4258,12 @@ void apStart() {
 
   WiFi.mode(WIFI_AP_STA);
   WiFi.setAutoReconnect(false);
+  staAssociated = false;
   WiFi.disconnect(false);
   connectPending = false;
   apJoinPending = false;
   apJoinApplyAt = 0;
+  apAutoJoin = false;
   WiFi.setOutputPower(17.0f);  // setup needs reliable phone coverage; restored when AP stops
   // STA ще не підключено: шукаємо канал нашого роутера скануванням.
   // ESP8266 STA+AP працюють лише на одному каналі, ch=1 блокиє підключення.
@@ -4264,6 +4300,7 @@ void apStart() {
 
   apRunning = true;
   apStopAt = 0;
+  apAutoRetryAt = millis() + AP_AUTO_RETRY_MS;
 
   Serial.println();
   Serial.print("AP ON: ");
@@ -4299,10 +4336,19 @@ void wifiBegin() {
   loadCreds();
 
   WiFi.persistent(false);
-  WiFi.mode(WIFI_AP_STA);
+  WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   WiFi.setSleepMode(WIFI_NONE_SLEEP);   // без modem-sleep: на слабкому сигналі DTIM дає багатосекундні залипання TCP
-  WiFi.setOutputPower(WIFI_TX_DBM);     // менше RF-наводки на PIR (D5 поруч з антеною)
+  WiFi.setOutputPower(WIFI_JOIN_TX_DBM);  // reduce TX power only AFTER a successful join
+  staLinkHandler = WiFi.onStationModeConnected([](const WiFiEventStationModeConnected &) {
+    staAssociated = true;
+    staAssociatedAt = millis();
+    Serial.println("STA: associated; waiting for DHCP (saved credentials retained)");
+  });
+  staLostHandler = WiFi.onStationModeDisconnected([](const WiFiEventStationModeDisconnected &event) {
+    staAssociated = false;
+    Serial.printf("STA: disconnected, reason=%u (saved credentials retained)\n", event.reason);
+  });
 
   apSsidStr = String(AP_PREFIX) + String(ESP.getChipId(), HEX);
 
@@ -4355,6 +4401,7 @@ void wifiBegin() {
   staDownSince = millis();
 
   if (haveCreds) {
+    Serial.println("WIFI LOAD: credentials present in flash");
     WiFi.begin(creds.ssid, creds.pass);
     connectPending = true;
     connectStartedAt = millis();
@@ -4390,10 +4437,26 @@ void mdnsStop() {
 void wifiStateTick() {
   unsigned long now = millis();
   bool connected = (WiFi.status() == WL_CONNECTED);
+  // Finish scans even if the phone closed the page before polling the result.
+  if (apScanPending) {
+    const int result = WiFi.scanComplete();
+    if (result != WIFI_SCAN_RUNNING) {
+      apScanPending = false;
+      if (result >= 0) collectNets(result);
+      else WiFi.scanDelete();
+    }
+  }
 
   if (connected) {
+    if (!staWasConnected) {
+      Serial.print("STA: connected from saved credentials, IP ");
+      Serial.println(WiFi.localIP());
+      if (!apRunning) WiFi.setOutputPower(WIFI_TX_DBM);
+    }
+    staWasConnected = true;
     connectPending = false;
     apJoinPending = false;
+    apAutoJoin = false;
     staDownTracked = false;
     staChannel = WiFi.channel();   // канал роутера (для AP: той самий канал)
     mdnsStart();
@@ -4405,11 +4468,19 @@ void wifiStateTick() {
       else if (timeReached(now, apStopAt)) apStop();
     }
   } else {
+    if (staWasConnected) {
+      WiFi.setOutputPower(apRunning ? 17.0f : WIFI_JOIN_TX_DBM);
+      staRetryAt = now;
+    }
+    staWasConnected = false;
     mdnsStop();
 
     // STA повторюємо раз на STA_RETRY_MS: після збою роутера драйвер сам не відновлюється
-    if (!apRunning && haveCreds && timeReached(now, staRetryAt)) {
+    const bool waitingForDHCP = staAssociated && now - staAssociatedAt < WIFI_DHCP_TIMEOUT_MS;
+    if (!apRunning && haveCreds && !waitingForDHCP && timeReached(now, staRetryAt)) {
       staRetryAt = now + STA_RETRY_MS;
+      staAssociated = false;
+      WiFi.disconnect(false);
       WiFi.begin(creds.ssid, creds.pass);
       Serial.print("STA: retry (");
       Serial.print(WiFi.status());
@@ -4418,7 +4489,7 @@ void wifiStateTick() {
 
     // ДАГОСЛИТ: один раз після довгого провалу (скан рве поточне підключення,
     // тому робимо його лише коли STA немає > 60 с і не частіше ніж раз на 60 с)
-    if (!apRunning && haveCreds && (now - staDownSince > 60000UL) && timeReached(now, staScanAt)) {
+    if (!apRunning && haveCreds && !waitingForDHCP && (now - staDownSince > 60000UL) && timeReached(now, staScanAt)) {
       staScanAt = now + 60000UL;
       int n = WiFi.scanNetworks();
       Serial.print("SCAN: n=");
@@ -4445,11 +4516,41 @@ void wifiStateTick() {
 
     // A bad password must not leave the SDK roaming/retrying under the portal.
     // Retain connectPending so /status can report the failed attempt to the UI.
-    if (apRunning && apJoinPending && now - connectStartedAt >= WIFI_TIMEOUT) {
+    if (apRunning && apJoinPending && !waitingForDHCP && now - connectStartedAt >= WIFI_TIMEOUT) {
       WiFi.disconnect(false);
       WiFi.mode(WIFI_AP);
       apJoinPending = false;
+      apAutoJoin = false;
+      apAutoRetryAt = now + AP_AUTO_RETRY_MS;
       Serial.println("AP: join timed out; stable setup mode restored");
+    }
+    // Opening the recovery AP must NOT permanently abandon saved Wi-Fi.
+    // Retry only while no phone is using setup; pause again if a phone joins.
+    const bool portalInUse = apRunning && WiFi.softAPgetStationNum() > 0;
+    if (portalInUse) {
+      apAutoRetryAt = now + AP_AUTO_RETRY_MS;
+      if (apAutoJoin) {
+        WiFi.disconnect(false);
+        WiFi.mode(WIFI_AP);
+        apAutoJoin = false;
+        apJoinPending = false;
+        connectPending = false;
+        Serial.println("STA: auto retry paused for portal client");
+      }
+    }
+    if (apRunning && haveCreds && !portalInUse && !apJoinPending && !apJoinApplyAt &&
+        !apScanPending && timeReached(now, apAutoRetryAt)) {
+      WiFi.mode(WIFI_AP_STA);
+      WiFi.setAutoReconnect(false);
+      WiFi.setOutputPower(WIFI_JOIN_TX_DBM);
+      staAssociated = false;
+      WiFi.begin(creds.ssid, creds.pass);
+      connectPending = true;
+      apJoinPending = true;
+      apAutoJoin = true;
+      connectStartedAt = now;
+      apAutoRetryAt = now + AP_AUTO_RETRY_MS;
+      Serial.println("STA: recovery retry using saved Wi-Fi (no new setup needed)");
     }
     if (apRunning) apStopAt = 0;
 
@@ -4459,7 +4560,7 @@ void wifiStateTick() {
     }
     // Recovery must remain accessible even after a router/password change.
     const unsigned long portalDelay = haveCreds ? 30000UL : 0UL;
-    if (!apRunning && apStopAt == 0 && (now - staDownSince >= portalDelay)) {
+    if (!apRunning && apStopAt == 0 && !waitingForDHCP && (now - staDownSince >= portalDelay)) {
       apStart();
     }
   }
@@ -4492,6 +4593,7 @@ void wifiLoop() {
   if (apJoinApplyAt && timeReached(now, apJoinApplyAt)) {
     apJoinApplyAt = 0;
     WiFi.setAutoReconnect(false);
+    WiFi.setOutputPower(WIFI_JOIN_TX_DBM);
     WiFi.mode(WIFI_AP_STA);
     WiFi.disconnect(false);
     WiFi.begin(creds.ssid, creds.pass);
