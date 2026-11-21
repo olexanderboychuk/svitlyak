@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="1000" viewBox="0 0 1400 1000">
+<defs>
+ <linearGradient id="bg" x2="1" y2="1"><stop stop-color="#101d29"/><stop offset="1" stop-color="#070d14"/></linearGradient>
+ <linearGradient id="shell" x2="1" y2=".6"><stop stop-color="#5a6671"/><stop offset=".4" stop-color="#283540"/><stop offset="1" stop-color="#101c25"/></linearGradient>
+ <linearGradient id="face" x2="1" y2="1"><stop stop-color="#384651"/><stop offset="1" stop-color="#17232c"/></linearGradient>
+ <radialGradient id="lens"><stop stop-color="#fffdf1"/><stop offset=".6" stop-color="#d6e3df"/><stop offset="1" stop-color="#8badaa"/></radialGradient>
+ <filter id="glow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="13"/></filter>
+ <filter id="shadow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="20"/></filter>
+</defs>
+<rect width="1400" height="1000" fill="url(#bg)"/>
+<g font-family="Segoe UI,Arial,sans-serif">
+ <text x="80" y="85" fill="#ffd58b" font-size="15" letter-spacing="5">SVITLYAK / ENCLOSURE STUDY 01</text>
+ <text x="80" y="145" fill="#eef3f5" font-size="46" font-weight="600">Світляк</text>
+ <text x="82" y="184" fill="#91a7b7" font-size="19">Концепт корпуса · 18650 · ESP8266 · SR505</text>
+ <ellipse cx="450" cy="850" rx="280" ry="38" fill="#000" opacity=".65" filter="url(#shadow)"/>
+ <!-- perspective illustration; not a CAD render -->
+ <path d="M265 300 C323 244 470 247 560 297 C675 362 715 535 672 662 C647 739 606 769 560 783 L541 832 Q512 852 477 834 L461 805 C335 808 229 746 207 623 C183 490 194 372 265 300Z" fill="url(#shell)" stroke="#637480" stroke-width="2"/>
+ <path d="M265 300 C323 244 470 247 560 297 L599 323 C485 294 328 289 265 341Z" fill="#70818b" opacity=".3"/>
+ <ellipse cx="427" cy="527" rx="222" ry="254" fill="url(#face)" stroke="#78848c" stroke-opacity=".4" stroke-width="2"/>
+ <ellipse cx="427" cy="527" rx="174" ry="201" fill="none" stroke="#ffbb57" stroke-width="39" opacity=".6" filter="url(#glow)"/>
+ <ellipse cx="427" cy="527" rx="174" ry="201" fill="none" stroke="#ffe0a4" stroke-width="25"/>
+ <ellipse cx="427" cy="527" rx="174" ry="201" fill="none" stroke="#fff4d4" stroke-width="10" opacity=".8"/>
+ <ellipse cx="427" cy="527" rx="141" ry="164" fill="#1e2c36" stroke="#44515b" stroke-width="2"/>
+ <text x="427" y="522" text-anchor="middle" fill="#8b9ba5" font-size="14" letter-spacing="4">СВІТЛЯК</text>
+ <text x="427" y="548" text-anchor="middle" fill="#59707f" font-size="11" letter-spacing="2">WARM LIGHT / MOTION</text>
+ <path d="M393 758 L395 810 Q426 855 458 813 L461 758" fill="url(#face)" stroke="#63727c" stroke-width="2"/>
+ <ellipse cx="427" cy="803" rx="21" ry="24" fill="#0c1820"/>
+ <ellipse cx="427" cy="801" rx="16" ry="19" fill="url(#lens)"/>
+ <g fill="none" stroke="#a5bcb7" opacity=".65"><path d="M413 795 Q427 785 442 795 M412 804 Q427 795 442 804 M416 814 Q427 805 439 814 M427 783 L427 819 M417 786 Q422 801 417 814 M437 786 Q432 801 437 814"/></g>
+ <ellipse cx="649" cy="493" rx="7" ry="12" fill="#07131a" stroke="#637480" stroke-width="2"/>
+ <g fill="#131f28" stroke="#5a6a75"><ellipse cx="281" cy="352" rx="4" ry="5"/><ellipse cx="575" cy="355" rx="4" ry="5"/><ellipse cx="281" cy="701" rx="4" ry="5"/><ellipse cx="575" cy="701" rx="4" ry="5"/></g>
+ <g stroke="#75909e" stroke-width="1.3" fill="none"><path d="M539 358 L742 291 L815 291"/><path d="M651 492 L760 428 L815 428"/><path d="M447 804 L740 682 L815 682"/></g>
+ <g fill="#e5edf1" font-size="22"><text x="839" y="285">Теплий світловий обідок</text><text x="839" y="422">LDR у бічному каналі</text><text x="839" y="676">PIR у нижньому виступі</text></g>
+ <g fill="#8ba2b2" font-size="16"><text x="839" y="316">Окремий напівпрозорий розсіювач</text><text x="839" y="453">Непрозора перегородка всередині</text><text x="839" y="707">Лінза SR505 відкрита назовні</text></g>
+ <rect x="825" y="495" width="490" height="119" rx="16" fill="#17252f" stroke="#2c414f"/>
+ <text x="849" y="529" fill="#b7c7d0" font-size="17">УСЕРЕДИНІ — РЕЗЕРВ ПІД КОМПОНЕНТИ</text>
+ <rect x="853" y="550" width="173" height="32" rx="16" fill="#776a9b"/><rect x="1025" y="560" width="6" height="12" fill="#a8afb5"/>
+ <text x="938" y="572" text-anchor="middle" fill="#f0eaff" font-size="16">18650</text>
+ <rect x="1062" y="548" width="88" height="37" rx="4" fill="#34675b"/><text x="1106" y="572" text-anchor="middle" fill="#d2f2e4" font-size="14">ESP</text>
+ <text x="1170" y="572" fill="#8098a8" font-size="15">+ UPS*</text>
+ <text x="839" y="776" fill="#e8d09b" font-size="18">Орієнтир: Ø120 × 47 мм</text>
+ <text x="839" y="803" fill="#8ba2b2" font-size="16">З виступом PIR: висота ~150 мм</text>
+ <line x1="80" y1="904" x2="1320" y2="904" stroke="#2d424f"/>
+ <text x="80" y="942" fill="#ffcc7d" font-size="17">КОНЦЕПТ — НЕ ФОТО ВИРОБУ. РОЗМІРИ КОМПОНЕНТІВ ПОКИ УМОВНІ.</text>
+ <text x="80" y="971" fill="#7f99aa" font-size="15">* Плата UPS ще не підібрана. Перед друком потрібні заміри, перевірка посадок, нагріву та RF-завад PIR.</text>
+</g>
+</svg>

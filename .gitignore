@@ -1,0 +1,34 @@
+# Generated firmware and build artifacts
+/build/
+*.bin
+*.elf
+*.map
+*.o
+*.a
+
+# Local hardware experiments (contain workstation paths and LAN addresses)
+/tests/pir-ab-30min.ps1
+/tests/pir-supply-30min.ps1
+*.log
+*.jsonl
+
+# Local credentials / tool state
+.env
+.env.*
+!.env.example
+secrets.*
+credentials.*
+arduino-cli.yaml
+.arduinoIDE/
+.vscode/
+.idea/
+__pycache__/
+
+# Editor / OS / CAD temporary files
+*.bak
+*.tmp
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
